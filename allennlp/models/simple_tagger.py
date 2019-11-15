@@ -61,6 +61,8 @@ class SimpleTagger(Model):
         label_encoding: Optional[str] = None,
         label_namespace: str = "labels",
         verbose_metrics: bool = False,
+        label_smoothing: float = 0.0,
+        dropout: float = None,
         initializer: InitializerApplicator = InitializerApplicator(),
         regularizer: Optional[RegularizerApplicator] = None,
     ) -> None:
@@ -71,9 +73,15 @@ class SimpleTagger(Model):
         self.num_classes = self.vocab.get_vocab_size(label_namespace)
         self.encoder = encoder
         self._verbose_metrics = verbose_metrics
+        self.label_smoothing = label_smoothing
         self.tag_projection_layer = TimeDistributed(
             Linear(self.encoder.get_output_dim(), self.num_classes)
         )
+
+        if dropout:
+            self._dropout = torch.nn.Dropout(dropout)
+        else:
+            self._dropout = None
 
         check_dimensions_match(
             text_field_embedder.get_output_dim(),
@@ -143,6 +151,9 @@ class SimpleTagger(Model):
 
         """
         embedded_text_input = self.text_field_embedder(tokens)
+        if self._dropout is not None:
+            embedded_text_input = self._dropout(embedded_text_input)
+
         batch_size, sequence_length, _ = embedded_text_input.size()
         mask = get_text_field_mask(tokens)
         encoded_text = self.encoder(embedded_text_input, mask)
@@ -156,7 +167,7 @@ class SimpleTagger(Model):
         output_dict = {"logits": logits, "class_probabilities": class_probabilities}
 
         if tags is not None:
-            loss = sequence_cross_entropy_with_logits(logits, tags, mask)
+            loss = sequence_cross_entropy_with_logits(logits, tags, mask, label_smoothing=self.label_smoothing)
             for metric in self.metrics.values():
                 metric(logits, tags, mask.float())
             if self._f1_metric is not None:
@@ -182,7 +193,7 @@ class SimpleTagger(Model):
         all_tags = []
         for predictions in predictions_list:
             argmax_indices = numpy.argmax(predictions, axis=-1)
-            tags = [self.vocab.get_token_from_index(x, namespace="labels") for x in argmax_indices]
+            tags = [self.vocab.get_token_from_index(x, namespace=self.label_namespace) for x in argmax_indices]
             all_tags.append(tags)
         output_dict["tags"] = all_tags
         return output_dict

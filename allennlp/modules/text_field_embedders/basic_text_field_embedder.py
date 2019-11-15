@@ -52,6 +52,7 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
         token_embedders: Dict[str, TokenEmbedder],
         embedder_to_indexer_map: Dict[str, Union[List[str], Dict[str, str]]] = None,
         allow_unmatched_keys: bool = False,
+        dropout: float = 0.0,
     ) -> None:
         super().__init__()
         self._token_embedders = token_embedders
@@ -60,6 +61,7 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
             name = "token_embedder_%s" % key
             self.add_module(name, embedder)
         self._allow_unmatched_keys = allow_unmatched_keys
+        self._dropout = torch.nn.Dropout(p=dropout) if dropout > 0 else lambda x: x
 
     @overrides
     def get_output_dim(self) -> int:
@@ -138,7 +140,7 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
                 tensors = [text_field_input[key]]
                 token_vectors = embedder(*tensors, **forward_params_values)
             embedded_representations.append(token_vectors)
-        return torch.cat(embedded_representations, dim=-1)
+        return self._dropout(torch.cat(embedded_representations, dim=-1))
 
     # This is some unusual logic, it needs a custom from_params.
     @classmethod
@@ -161,6 +163,8 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
 
         token_embedder_params = params.pop("token_embedders", None)
 
+        dropout = params.pop("dropout", 0)
+
         if token_embedder_params is not None:
             # New way: explicitly specified, so use it.
             token_embedders = {
@@ -178,4 +182,4 @@ class BasicTextFieldEmbedder(TextFieldEmbedder):
                 )
 
         params.assert_empty(cls.__name__)
-        return cls(token_embedders, embedder_to_indexer_map, allow_unmatched_keys)
+        return cls(token_embedders, embedder_to_indexer_map, allow_unmatched_keys, dropout)

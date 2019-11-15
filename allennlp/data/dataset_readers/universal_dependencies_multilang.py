@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, List, Iterator, Any
+from typing import Dict, Tuple, List, Iterator, Any, Callable
 import logging
 import itertools
 import glob
@@ -13,12 +13,12 @@ from allennlp.data.dataset_readers.dataset_reader import DatasetReader
 from allennlp.data.fields import Field, TextField, SequenceLabelField, MetadataField
 from allennlp.data.instance import Instance
 from allennlp.data.token_indexers import SingleIdTokenIndexer, TokenIndexer
-from allennlp.data.tokenizers import Token
+from allennlp.data.tokenizers import Token, lemma_util
 
 logger = logging.getLogger(__name__)
 
 
-def get_file_paths(pathname: str, languages: List[str]):
+def get_file_paths(pathname: str, languages: List[str] = None):
     """
     Gets a list of all files by the pathname with the given language ids.
     Filenames are assumed to have the language identifier followed by a dash
@@ -28,18 +28,18 @@ def get_file_paths(pathname: str, languages: List[str]):
     ----------
     pathname :  ``str``, required.
         An absolute or relative pathname (can contain shell-style wildcards)
-    languages : ``List[str]``, required
-        The language identifiers to use.
+    languages : ``List[str]``, optional (default = None)
+        The language identifiers to use. Set to None to use all available languages.
 
     Returns
     -------
     A list of tuples (language id, file path).
     """
     paths = []
-    for file_path in glob.glob(pathname):
-        base = os.path.splitext(os.path.basename(file_path))[0]
+    for file_path in sorted(glob.glob(pathname)):
+        base = str(os.path.splitext(os.path.basename(file_path))[0])
         lang_id = base.split("-")[0]
-        if lang_id in languages:
+        if languages is None or lang_id in languages:
             paths.append((lang_id, file_path))
 
     if not paths:
@@ -64,8 +64,8 @@ class UniversalDependenciesMultiLangDatasetReader(DatasetReader):
 
     Parameters
     ----------
-    languages : ``List[str]``, required
-        The language identifiers to use.
+    languages : ``List[str]``, optional (default = None)
+        The language identifiers to use. Set to None to use all available languages.
     token_indexers : ``Dict[str, TokenIndexer]``, optional (default=``{"tokens": SingleIdTokenIndexer()}``)
         The token indexers to be applied to the words TextField.
     use_language_specific_pos : ``bool``, optional (default = False)
@@ -82,7 +82,7 @@ class UniversalDependenciesMultiLangDatasetReader(DatasetReader):
 
     def __init__(
         self,
-        languages: List[str],
+        languages: List[str] = None,
         token_indexers: Dict[str, TokenIndexer] = None,
         use_language_specific_pos: bool = False,
         lazy: bool = False,
@@ -114,16 +114,44 @@ class UniversalDependenciesMultiLangDatasetReader(DatasetReader):
                 # dependencies for the original sentence.
                 # We filter by None here as elided words have a non-integer word id,
                 # and are replaced with None by the conllu python library.
-                annotation = [x for x in annotation if x["id"] is not None]
+                annotation = [x for x in annotation if isinstance(x["id"], int)]
+                multiword_tokens = [x for x in annotation if isinstance(x["id"], tuple)]
 
-                heads = [x["head"] for x in annotation]
-                tags = [x["deprel"] for x in annotation]
-                words = [x["form"] for x in annotation]
-                if self._use_language_specific_pos:
-                    pos_tags = [x["xpostag"] for x in annotation]
-                else:
-                    pos_tags = [x["upostag"] for x in annotation]
-                yield self.text_to_instance(lang, words, pos_tags, list(zip(tags, heads)))
+                if not annotation:
+                    # Empty lines should be skipped
+                    continue
+
+                def get_field(field: str,
+                              map_fn: Callable[[Any], Any] = None,
+                              sentence: List[Any] = tuple(annotation)) -> List[Any]:
+                    """
+                    Calls the function on the annotation with the given field name.
+                    Returns '_' if the field is empty (conllu's way of indicating null).
+                    """
+                    map_fn = map_fn if map_fn is not None else lambda x: x
+                    return [map_fn(line[field]) if line[field] is not None else "_"
+                            for line in sentence if field in line]
+
+                ids = get_field("id")
+                multiword_ids = get_field("multi_id", sentence=multiword_tokens)
+                multiword_forms = get_field("form", sentence=multiword_tokens)
+
+                words = get_field("form")
+                lemmas = get_field("lemma")
+                lemmas_tags = [lemma_util.gen_lemma_rule(word, lemma)
+                               if lemma != "_" else "_"
+                               for word, lemma in zip(words, lemmas)]
+                upos_tags = get_field("upostag")
+                xpos_tags = get_field("xpostag")
+                pos_tags = xpos_tags if self._use_language_specific_pos else upos_tags
+                feats_tags = get_field("feats", lambda x: "|".join(k + "=" + v for k, v in x.items())
+                                                          if hasattr(x, "items") else "_")
+                heads = get_field("head")
+                dep_rels = get_field("deprel")
+                dependencies = list(zip(dep_rels, heads))
+
+                yield self.text_to_instance(lang, words, lemmas, upos_tags, xpos_tags, pos_tags, feats_tags,
+                                            lemmas_tags, dependencies, ids, multiword_ids, multiword_forms)
 
     @overrides
     def _read(self, file_path: str):
@@ -160,8 +188,16 @@ class UniversalDependenciesMultiLangDatasetReader(DatasetReader):
         self,  # type: ignore
         lang: str,
         words: List[str],
-        upos_tags: List[str],
+        lemmas: List[str] = None,
+        upos_tags: List[str] = None,
+        xpos_tags: List[str] = None,
+        pos_tags: List[str] = None,
+        feats_tags: List[str] = None,
+        lemmas_tags: List[str] = None,
         dependencies: List[Tuple[str, int]] = None,
+        ids: List[str] = None,
+        multiword_ids: List[str] = None,
+        multiword_forms: List[str] = None
     ) -> Instance:
 
         """
@@ -171,32 +207,68 @@ class UniversalDependenciesMultiLangDatasetReader(DatasetReader):
             The language identifier.
         words : ``List[str]``, required.
             The words in the sentence to be encoded.
-        upos_tags : ``List[str]``, required.
-            The universal dependencies POS tags for each word.
+        lemmas: ``List[str]``, optional (default = None)
+            The universal dependencies lemmas for each word.
+        upos_tags : ``List[str]``, optional (default = None)
+            The universal dependencies UPOS tags for each word.
+        xpos_tags : ``List[str]``, optional (default = None)
+            The universal dependencies XPOS tags for each word.
+        pos_tags : ``List[str]``, optional (default = None)
+            The POS tags for each word given by self.use_language_specific_pos.
+        feats_tags: ``List[str]``, optional (default = None)
+            The universal dependencies FEATS tags for each word.
+        lemmas_tags: ``List[str]``, optional (default = None)
+            The lemma tags for each word using edit scripts.
         dependencies ``List[Tuple[str, int]]``, optional (default = None)
             A list of  (head tag, head index) tuples. Indices are 1 indexed,
             meaning an index of 0 corresponds to that word being the root of
             the dependency tree.
+        ids: ``List[str]``, optional (default = None)
+            The universal dependencies ids for each word.
+        multiword_ids: ``List[str]``, optional (default = None)
+            The universal dependencies multiword ids (indicated by '-' in the id).
+        multiword_forms: ``List[str]``, optional (default = None)
+            The universal dependencies multiword forms (indicated by the multiword ids).
 
         Returns
         -------
-        An instance containing words, upos tags, dependency head tags and head
+        An instance containing words, ids, tags, dependency head tags and head
         indices as fields. The language identifier is stored in the metadata.
         """
         fields: Dict[str, Field] = {}
 
         tokens = TextField([Token(w) for w in words], self._token_indexers)
         fields["words"] = tokens
-        fields["pos_tags"] = SequenceLabelField(upos_tags, tokens, label_namespace="pos")
+        fields["lemmas"] = TextField([Token(l) for l in lemmas], self._token_indexers)
+
+        tag_names = ["upos_tags", "xpos_tags", "pos_tags", "feats_tags", "lemmas_tags"]
+        tag_fields = [upos_tags, xpos_tags, pos_tags, feats_tags, lemmas_tags]
+        for name, field in zip(tag_names, tag_fields):
+            if field:
+                fields[name] = SequenceLabelField(field, tokens, label_namespace=name)
+
         if dependencies is not None:
             # We don't want to expand the label namespace with an additional dummy token, so we'll
             # always give the 'ROOT_HEAD' token a label of 'root'.
             fields["head_tags"] = SequenceLabelField(
-                [x[0] for x in dependencies], tokens, label_namespace="head_tags"
+                [tags for tags, _ in dependencies], tokens, label_namespace="head_tags"
             )
             fields["head_indices"] = SequenceLabelField(
-                [int(x[1]) for x in dependencies], tokens, label_namespace="head_index_tags"
+                [indices for _, indices in dependencies], tokens, label_namespace="head_index_tags"
             )
 
-        fields["metadata"] = MetadataField({"words": words, "pos": upos_tags, "lang": lang})
+        fields["metadata"] = MetadataField({
+            "lang": lang,
+            "words": words,
+            "upos": upos_tags,
+            "xpos": xpos_tags,
+            "pos": pos_tags,
+            "feats": feats_tags,
+            "lemmas": lemmas,
+            "lemmas_tags": lemmas_tags,
+            "ids": ids,
+            "multiword_ids": multiword_ids,
+            "multiword_forms": multiword_forms
+        })
+
         return Instance(fields)

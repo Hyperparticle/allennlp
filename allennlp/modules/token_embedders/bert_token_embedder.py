@@ -81,6 +81,7 @@ class BertEmbedder(TokenEmbedder):
         num_start_tokens: int = 1,
         num_end_tokens: int = 1,
         scalar_mix_parameters: List[float] = None,
+        scalar_mix_dropout: float = 0.0
     ) -> None:
         super().__init__()
         self.bert_model = bert_model
@@ -95,6 +96,7 @@ class BertEmbedder(TokenEmbedder):
                 do_layer_norm=False,
                 initial_scalar_parameters=scalar_mix_parameters,
                 trainable=scalar_mix_parameters is None,
+                dropout=scalar_mix_dropout,
             )
         else:
             self._scalar_mix = None
@@ -287,7 +289,9 @@ class PretrainedBertEmbedder(BertEmbedder):
         pretrained_model: str,
         requires_grad: bool = False,
         top_layer_only: bool = False,
+        dropout: float = 0.0,
         scalar_mix_parameters: List[float] = None,
+        scalar_mix_dropout: float = 0.0,
     ) -> None:
         model = PretrainedBertModel.load(pretrained_model)
 
@@ -298,4 +302,22 @@ class PretrainedBertEmbedder(BertEmbedder):
             bert_model=model,
             top_layer_only=top_layer_only,
             scalar_mix_parameters=scalar_mix_parameters,
+            scalar_mix_dropout=scalar_mix_dropout
         )
+
+        self.model: BertModel = self.bert_model
+        self.dropout = dropout
+        self.set_dropout(dropout)
+
+    def set_dropout(self, dropout):
+        """
+        Applies dropout to all BERT layers
+        """
+        self.dropout = dropout
+
+        self.model.embeddings.dropout.p = dropout
+
+        for layer in self.model.encoder.layer:
+            layer.attention.self.dropout.p = dropout
+            layer.attention.output.dropout.p = dropout
+            layer.output.dropout.p = dropout

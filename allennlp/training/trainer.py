@@ -29,6 +29,12 @@ from allennlp.training.moving_average import MovingAverage
 
 logger = logging.getLogger(__name__)
 
+try:
+    from apex import amp
+    using_amp = True
+except ImportError:
+    using_amp = False
+
 
 @TrainerBase.register("default")
 class Trainer(TrainerBase):
@@ -60,6 +66,7 @@ class Trainer(TrainerBase):
         should_log_learning_rate: bool = False,
         log_batch_size_period: Optional[int] = None,
         moving_average: Optional[MovingAverage] = None,
+        use_mixed_precision: bool = False,
     ) -> None:
         """
         A trainer for doing supervised learning. It just takes a labeled dataset
@@ -171,6 +178,9 @@ class Trainer(TrainerBase):
             parameters. Be careful that when saving the checkpoint, we will save the moving averages of
             parameters. This is necessary because we want the saved model to perform as well as the validated
             model if we load it later. But this may cause problems if you restart the training from checkpoint.
+        use_mixed_precision: ``bool``, (default = False)
+            If True, then run with mixed precison. This option requires apex
+            (https://www.github.com/nvidia/apex) to be installed, which handles automatic conversion to fp16.
         """
         super().__init__(serialization_dir, cuda_device)
 
@@ -184,6 +194,14 @@ class Trainer(TrainerBase):
         self.optimizer = optimizer
         self.train_data = train_dataset
         self._validation_data = validation_dataset
+        self._use_mixed_precision = use_mixed_precision
+
+        if use_mixed_precision:
+            if not using_amp:
+                raise ConfigurationError("To enable mixed precision training, install "
+                                         "NVIDIA Apex (https://github.com/nvidia/apex)")
+            logger.info("Using mixed precision training")
+            self.model, self.optimizer = amp.initialize(self.model, self.optimizer)
 
         if patience is None:  # no early stopping
             if validation_dataset:
@@ -330,7 +348,11 @@ class Trainer(TrainerBase):
             if torch.isnan(loss):
                 raise ValueError("nan loss encountered")
 
-            loss.backward()
+            if self._use_mixed_precision:
+                with amp.scale_loss(loss, self.optimizer) as scaled_loss:
+                    scaled_loss.backward()
+            else:
+                loss.backward()
 
             train_loss += loss.item()
 
@@ -752,6 +774,7 @@ class Trainer(TrainerBase):
         should_log_parameter_statistics = params.pop_bool("should_log_parameter_statistics", True)
         should_log_learning_rate = params.pop_bool("should_log_learning_rate", False)
         log_batch_size_period = params.pop_int("log_batch_size_period", None)
+        use_mixed_precision = params.pop_bool("use_mixed_precision", False)
 
         params.assert_empty(cls.__name__)
         return cls(
@@ -779,4 +802,5 @@ class Trainer(TrainerBase):
             should_log_learning_rate=should_log_learning_rate,
             log_batch_size_period=log_batch_size_period,
             moving_average=moving_average,
+            use_mixed_precision=use_mixed_precision,
         )

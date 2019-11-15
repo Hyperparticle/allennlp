@@ -280,7 +280,7 @@ class DataIterator(Registrable):
 
             # Adding the current instance would exceed the batch size or sample size.
             if (
-                proposed_batch_size >= self._batch_size
+                proposed_batch_size > self._batch_size
                 or padding_length * proposed_batch_size > limit
             ):
                 # Output the already existing batch

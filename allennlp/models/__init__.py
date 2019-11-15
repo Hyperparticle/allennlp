@@ -10,6 +10,10 @@ from allennlp.models.biattentive_classification_network import BiattentiveClassi
 from allennlp.models.constituency_parser import SpanConstituencyParser
 from allennlp.models.biaffine_dependency_parser import BiaffineDependencyParser
 from allennlp.models.biaffine_dependency_parser_multilang import BiaffineDependencyParserMultiLang
+from allennlp.models.udify_multilang_ud_parser import UDifyMultilangUDParser
+from allennlp.models.tagger_multitask import TaggerMultitask
+from allennlp.models.lemmatizer_multitask import LemmatizerMultitask
+from allennlp.models.biaffine_dependency_parser_multitask import BiaffineDependencyParser
 from allennlp.models.coreference_resolution.coref import CoreferenceResolver
 from allennlp.models.crf_tagger import CrfTagger
 from allennlp.models.decomposable_attention import DecomposableAttention

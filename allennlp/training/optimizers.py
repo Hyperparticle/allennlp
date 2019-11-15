@@ -155,6 +155,17 @@ Registrable._registry[Optimizer] = {
     "bert_adam": BertAdam,
 }
 
+try:
+    from apex.optimizers import FusedAdam, FusedLAMB, FusedNovoGrad, FusedSGD
+    Registrable._registry[Optimizer].update({
+        "fused_adam": FusedAdam,
+        "fused_lamb": FusedLAMB,
+        "fused_novograd": FusedNovoGrad,
+        "fused_sgd": FusedSGD,
+    })
+except ImportError:
+    pass
+
 
 def _safe_sparse_mask(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """

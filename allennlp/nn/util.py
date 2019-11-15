@@ -733,12 +733,39 @@ def sequence_cross_entropy_with_logits(
     weights = weights.float()
     # sum all dim except batch
     non_batch_dims = tuple(range(1, len(weights.shape)))
-    # shape : (batch_size,)
-    weights_batch_sum = weights.sum(dim=non_batch_dims)
     # shape : (batch * sequence_length, num_classes)
     logits_flat = logits.view(-1, logits.size(-1))
     # shape : (batch * sequence_length, num_classes)
     log_probs_flat = torch.nn.functional.log_softmax(logits_flat, dim=-1)
+    return sequence_cross_entropy(log_probs_flat,
+                                  targets,
+                                  weights,
+                                  average,
+                                  label_smoothing,
+                                  gamma,
+                                  alpha)
+
+
+def sequence_cross_entropy(
+    log_probs: torch.FloatTensor,
+    targets: torch.LongTensor,
+    weights: torch.FloatTensor,
+    average: str = "batch",
+    label_smoothing: float = None,
+    gamma: float = None,
+    alpha: Union[float, List[float], torch.FloatTensor] = None
+) -> torch.FloatTensor:
+    if average not in {None, "token", "batch"}:
+        raise ValueError("Got average f{average}, expected one of "
+                         "None, 'token', or 'batch'")
+    # make sure weights are float
+    weights = weights.float()
+    # sum all dim except batch
+    non_batch_dims = tuple(range(1, len(weights.shape)))
+    # shape : (batch_size,)
+    weights_batch_sum = weights.sum(dim=non_batch_dims)
+    # shape : (batch * sequence_length, num_classes)
+    log_probs_flat = log_probs.view(-1, log_probs.size(-1))
     # shape : (batch * max_len, 1)
     targets_flat = targets.view(-1, 1).long()
     # focal loss coefficient
@@ -785,7 +812,7 @@ def sequence_cross_entropy_with_logits(
         weights = weights * alpha_factor
 
     if label_smoothing is not None and label_smoothing > 0.0:
-        num_classes = logits.size(-1)
+        num_classes = log_probs.size(-1)
         smoothing_value = label_smoothing / num_classes
         # Fill all the correct indices with 1 - smoothing value.
         one_hot_targets = torch.zeros_like(log_probs_flat).scatter_(
@@ -1580,3 +1607,38 @@ def find_embedding_layer(model: torch.nn.Module) -> torch.nn.Module:
                             return embedder
             return module
     raise RuntimeError("No embedding module found!")
+
+
+def dynamic_mask(tokens: torch.LongTensor,
+                 oov_token: int,
+                 padding_tokens: List[int],
+                 prob: float = 0.0) -> torch.LongTensor:
+    """
+    Randomly replaces some of the non-padding tokens to a mask token with probability ``p``
+
+    :param tokens: The current batch of padded sentences with word ids
+    :param oov_token: The mask token
+    :param padding_tokens: The tokens for padding the input batch
+    :param prob: The probability a word gets mapped to the unknown token
+    :return: A copy of the input batch with token dropout applied
+    """
+    if prob > 0:
+        # Ensure that the tensors run on the same device
+        device = tokens.device
+
+        # This creates a mask that only considers unpadded tokens for mapping to oov
+        padding_mask = torch.ones(tokens.size(), dtype=torch.bool).to(device)
+        for pad in padding_tokens:
+            padding_mask &= (tokens != pad)
+
+        # Create a uniformly random mask selecting either the original words or OOV tokens
+        dropout_mask = (torch.empty(tokens.size()).uniform_() < prob).to(device)
+        oov_mask = dropout_mask & padding_mask
+
+        oov_fill = torch.empty(tokens.size(), dtype=torch.long).fill_(oov_token).to(device)
+
+        result = torch.where(oov_mask, oov_fill, tokens)
+
+        return result
+    else:
+        return tokens

@@ -1,0 +1,222 @@
+// Configuration for the multi-lingual dependency parser model based on:
+// Kondratyuk and Straka "75 Languages, 1 Model: Parsing Universal Dependencies Universally"
+// https://www.aclweb.org/anthology/D19-1279 (EMNLP 2019)
+//
+// To download the dataset, run scripts/universal_dependencies/download_ud_data.sh
+// or get it from https://universaldependencies.org
+{
+    /*  Instructions for using UDify.
+
+        To train, run:
+
+        allennlp train \
+            training_config/udify_multilang_ud_parser.jsonnet \
+            -s <logs_dir>
+
+
+        To predict from a pretrained model.tar.gz, run:
+
+        allennlp predict \
+            <model.tar.gz> \
+            <input.conllu> \
+            --output-file <output.conllu> \
+            --use-dataset-reader \
+            --predictor conllu
+
+        To evaluate on the test set, run:
+
+        python3 scripts/universal_dependencies/conll18_ud_eval.py \
+            <gold.conllu> \
+            <pred.conllu> \
+            --verbose
+    */
+    local batch_size = 32,
+
+    "dataset_reader": {
+        "type": "universal_dependencies_multilang",
+        "alternate": true,
+        "instances_per_file": batch_size,
+        // Set is_first_pass_for_vocab to false if loading a cached vocabulary
+        "is_first_pass_for_vocab": true,
+        // Set lazy to false to speed up training and allow shuffling, but requires lots of RAM
+        "lazy": true,
+        "token_indexers": {
+            "bert": {
+                "type": "bert-pretrained",
+                "pretrained_model": "bert-base-multilingual-cased",
+                "do_lowercase": false,
+                "use_starting_offsets": true,
+                "truncate_long_sequences": false
+            },
+            "tokens": {
+                "type": "single_id",
+                "lowercase_tokens": true
+            },
+                "token_characters": {
+                "type": "characters",
+                "min_padding_length": 1
+            }
+        }
+    },
+    "validation_dataset_reader": {
+        "type": "universal_dependencies_multilang",
+        "alternate": false,
+        "lazy": true,
+        "token_indexers": {
+            "bert": {
+                "type": "bert-pretrained",
+                "pretrained_model": "bert-base-multilingual-cased",
+                "do_lowercase": false,
+                "use_starting_offsets": true,
+                "truncate_long_sequences": false
+            }
+        }
+    },
+    "iterator": {
+        "type": "same_language",
+        "batch_size": batch_size,
+        // Split larger batches to conserve GPU memory (ensure <=100 tokens per batch instance)
+        "maximum_samples_per_batch": ["num_tokens", batch_size * 100],
+        "sorting_keys": [["words", "num_tokens"]],
+        "biggest_batch_first": true,
+        // ~800,000 train sentences in UD v2.4
+        // To measure for your custom treebanks, run this command in your treebanks directory:
+        // cat **/*train.conllu | grep -v '\S' | wc -l
+        "instances_per_epoch": 800 * 1000
+    },
+    "validation_iterator": {
+        "type": "same_language",
+        "batch_size": batch_size,
+        "maximum_samples_per_batch": ["num_tokens", batch_size * 100],
+        "sorting_keys": [["words", "num_tokens"]]
+    },
+    "model": {
+        "type": "udify_multilang_ud_parser",
+        "tasks": ["upos", "feats", "lemmas", "deps"],
+        "dropout": 0.5,
+        "word_dropout": 0.15,
+        "text_field_embedder": {
+            "dropout": 0.5,
+            "allow_unmatched_keys": true,
+            "embedder_to_indexer_map": {
+                "bert": ["bert", "bert-offsets"]
+            },
+            "token_embedders": {
+                "bert": {
+                    "type": "bert-pretrained",
+                    "pretrained_model": "bert-base-multilingual-cased",
+                    "requires_grad": true,
+                    "dropout": 0.15,
+                    "scalar_mix_dropout": 0.1
+                }
+            }
+        },
+        "encoder": {
+            "type": "pass_through",
+            "input_dim": 768
+        },
+        "decoders": {
+            "upos": {
+                "type": "tagger_multitask",
+                "label_namespace": "upos_tags",
+                "label_smoothing": 0.03,
+                "dropout": 0.5,
+                "encoder": {
+                    "type": "pass_through",
+                    "input_dim": 768
+                }
+            },
+            "feats": {
+                "type": "tagger_multitask",
+                "label_namespace": "feats_tags",
+                "label_smoothing": 0.03,
+                "dropout": 0.5,
+                // feats tags vocab can be large (>25,000), so use adaptive softmax (speeds up training)
+                "adaptive": true,
+                "adaptive_class_sizes": [0.05, 0.25],
+                "encoder": {
+                    "type": "pass_through",
+                    "input_dim": 768
+                }
+            },
+            "lemmas": {
+                "type": "lemmatizer_multitask",
+                "label_namespace": "lemmas_tags",
+                "label_smoothing": 0.03,
+                "dropout": 0.5,
+                // lemma tags vocab can be massive (>100,000), so use adaptive softmax (speeds up training)
+                "adaptive": true,
+                "adaptive_class_sizes": [0.01, 0.05, 0.25],
+                "encoder": {
+                    "type": "pass_through",
+                    "input_dim": 768
+                }
+            },
+            "deps": {
+                "type": "biaffine_parser_multitask",
+                "tag_representation_dim": 256,
+                "arc_representation_dim": 768,
+                "dropout": 0.5,
+                "encoder": {
+                    "type": "pass_through",
+                    "input_dim": 768
+                }
+            }
+        }
+    },
+    // In your shell, set: TRAIN_PATHNAME='std/**/*train.conllu'
+    "train_data_path": std.extVar("TRAIN_PATHNAME"),
+    "validation_data_path": std.extVar("DEV_PATHNAME"),
+
+//    "train_data_path": "/home/hyper/.data/ud-treebanks-v2.4/**/*train.conllu",
+//    "validation_data_path": "/home/hyper/.data/ud-treebanks-v2.4/**/*dev.conllu",
+
+    // Don't process the test data, should be evaluated using conll18_ud_eval.py
+    // "test_data_path": "*test.conllu",
+    "vocabulary": {
+        // Vocabulary creation takes a long time, so reuse the model vocab directory when possible
+        // "directory_path": "/vocabulary",
+    },
+    "trainer": {
+        "num_epochs": 100,
+        "patience": 20,
+        "num_serialized_models_to_keep": 8,
+        "keep_serialized_model_every_num_seconds": 2 * 60 * 60,
+        "model_save_interval": 1 * 60 * 60,
+        "should_log_learning_rate": true,
+        "summary_interval": 100,
+        "log_batch_size_period": 100,
+        "optimizer": {
+            // Set optimizer type to fused_adam if apex is installed (speeds up training)
+            "type": "adam",
+            "betas": [0.9, 0.99],
+            "weight_decay": 0.01,
+            "lr": 2e-3,
+            "parameter_groups": [
+                [["^text_field_embedder.*.bert_model.embeddings",
+                  "^text_field_embedder.*.bert_model.encoder"], {}],
+                [["^text_field_embedder.*.*_scalar_mix",
+                  "^text_field_embedder.*.pooler",
+                  "^scalar_mix",
+                  "^decoders",
+                  "^shared_encoder"], {}]
+            ]
+        },
+        "learning_rate_scheduler": {
+            "type": "ulmfit_sqrt",
+            "model_size": 1,
+            "warmup_steps": 10000,  // warmup_steps should be around 30% - 100% of start_step
+            "start_step": 25000, // start_step should be about equal to the number of batches for the first epoch
+            "factor": 5.0,
+            "gradual_unfreezing": true,
+            "discriminative_fine_tuning": true,
+            "decay_factor": 0.05
+        },
+        "validation_metric": "+.run/_avg",
+        "grad_norm": 1.0,
+        "grad_clipping": 1.0,
+        // Set use_mixed_precision to true if apex is installed (speeds up training, reduces memory)
+        "use_mixed_precision": false,
+        "cuda_device": 0
+    }
+}
